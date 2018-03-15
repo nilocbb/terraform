@@ -12,13 +12,20 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/hashicorp/hcl2/hcldec"
+
+	"github.com/hashicorp/hcl2/hcl"
+	"github.com/hashicorp/terraform/tfdiags"
+
 	"github.com/hashicorp/terraform/backend"
 	"github.com/hashicorp/terraform/command/clistate"
+	"github.com/hashicorp/terraform/config/configschema"
 	"github.com/hashicorp/terraform/helper/schema"
 	"github.com/hashicorp/terraform/state"
 	"github.com/hashicorp/terraform/terraform"
 	"github.com/mitchellh/cli"
 	"github.com/mitchellh/colorstring"
+	"github.com/zclconf/go-cty/cty"
 )
 
 const (
@@ -89,43 +96,102 @@ type Local struct {
 	// exact commands that are being run.
 	RunningInAutomation bool
 
-	schema *schema.Backend
 	opLock sync.Mutex
 	once   sync.Once
 }
 
-func (b *Local) Input(
-	ui terraform.UIInput, c *terraform.ResourceConfig) (*terraform.ResourceConfig, error) {
+func (b *Local) Schema() *configschema.Block {
 	b.once.Do(b.init)
 
-	f := b.schema.Input
 	if b.Backend != nil {
-		f = b.Backend.Input
+		return b.Backend.Schema()
 	}
 
-	return f(ui, c)
+	return &configschema.Block{
+		Attributes: map[string]*configschema.Attribute{
+			"path": {
+				Type:     cty.String,
+				Optional: true,
+			},
+			"workspace_dir": {
+				Type:     cty.String,
+				Optional: true,
+			},
+			// environment_dir was previously a deprecated alias for
+			// workspace_dir, but now removed.
+		},
+	}
 }
 
-func (b *Local) Validate(c *terraform.ResourceConfig) ([]string, []error) {
+func (b *Local) Validate(c hcl.Body) tfdiags.Diagnostics {
 	b.once.Do(b.init)
 
-	f := b.schema.Validate
 	if b.Backend != nil {
-		f = b.Backend.Validate
+		return b.Backend.Validate(c)
 	}
 
-	return f(c)
+	var diags tfdiags.Diagnostics
+
+	// We're going to use the low-level HCL API here so we can easily get
+	// source location information in the event of any errors.
+	spec := b.Schema().DecoderSpec()
+	rawSchema := hcldec.ImpliedSchema(spec)
+
+	if v := c.GetAttr("path"); !v.IsNull() {
+		if v.AsString() == "" {
+
+		}
+		path := v.AsString()
+	}
+
+	return diags
 }
 
-func (b *Local) Configure(c *terraform.ResourceConfig) error {
-	b.once.Do(b.init)
+func (b *Local) schemaConfigure(ctx context.Context) error {
+	d := schema.FromContextBackendConfig(ctx)
 
-	f := b.schema.Configure
-	if b.Backend != nil {
-		f = b.Backend.Configure
+	// Set the path if it is set
+	pathRaw, ok := d.GetOk("path")
+	if ok {
+		path := pathRaw.(string)
+		if path == "" {
+			return fmt.Errorf("configured path is empty")
+		}
+
+		b.StatePath = path
+		b.StateOutPath = path
 	}
 
-	return f(c)
+	if raw, ok := d.GetOk("workspace_dir"); ok {
+		path := raw.(string)
+		if path != "" {
+			b.StateWorkspaceDir = path
+		}
+	}
+
+	// Legacy name, which ConflictsWith workspace_dir
+	if raw, ok := d.GetOk("environment_dir"); ok {
+		path := raw.(string)
+		if path != "" {
+			b.StateWorkspaceDir = path
+		}
+	}
+
+	return nil
+}
+
+func (b *Local) Configure(c *cty.Value) tfdiags.Diagnostics {
+	b.once.Do(b.init)
+
+	if b.Backend != nil {
+		return b.Backend.Configure(c)
+	}
+
+	if v := c.GetAttr("path"); !v.IsNull() {
+		path := v.AsString()
+	}
+
+	return nil
 }
 
 func (b *Local) States() ([]string, error) {
@@ -345,35 +411,6 @@ func (b *Local) Colorize() *colorstring.Colorize {
 	return &colorstring.Colorize{
 		Colors:  colorstring.DefaultColors,
 		Disable: true,
-	}
-}
-
-func (b *Local) init() {
-	b.schema = &schema.Backend{
-		Schema: map[string]*schema.Schema{
-			"path": &schema.Schema{
-				Type:     schema.TypeString,
-				Optional: true,
-				Default:  "",
-			},
-
-			"workspace_dir": &schema.Schema{
-				Type:     schema.TypeString,
-				Optional: true,
-				Default:  "",
-			},
-
-			"environment_dir": &schema.Schema{
-				Type:          schema.TypeString,
-				Optional:      true,
-				Default:       "",
-				ConflictsWith: []string{"workspace_dir"},
-
-				Deprecated: "workspace_dir should be used instead, with the same meaning",
-			},
-		},
-
-		ConfigureFunc: b.schemaConfigure,
 	}
 }
 

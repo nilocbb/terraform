@@ -9,6 +9,10 @@ import (
 	"errors"
 	"time"
 
+	"github.com/hashicorp/hcl2/hcl"
+	"github.com/hashicorp/terraform/tfdiags"
+	"github.com/zclconf/go-cty/cty"
+
 	"github.com/hashicorp/terraform/command/clistate"
 	"github.com/hashicorp/terraform/config/module"
 	"github.com/hashicorp/terraform/state"
@@ -26,11 +30,15 @@ var ErrNamedStatesNotSupported = errors.New("named states not supported")
 
 // Backend is the minimal interface that must be implemented to enable Terraform.
 type Backend interface {
-	// Ask for input and configure the backend. Similar to
-	// terraform.ResourceProvider.
-	Input(terraform.UIInput, *terraform.ResourceConfig) (*terraform.ResourceConfig, error)
-	Validate(*terraform.ResourceConfig) ([]string, []error)
-	Configure(*terraform.ResourceConfig) error
+	// DecodeConfig transforms a raw HCL configuration body into a cty.Value
+	// representing the configuration, which can then be passed to Configure.
+	// If any error diagnostics are returned, the resulting value is ignored.
+	Validate(hcl.Body) (cty.Value, tfdiags.Diagnostics)
+
+	// Configure accepts a complete, validated configuration. The given value
+	// should be that returned by method Validate, assuming no error diagnostics
+	// were returned.
+	Configure(cty.Value) tfdiags.Diagnostics
 
 	// State returns the current state for this environment. This state may
 	// not be loaded locally: the proper APIs should be called on state.State
